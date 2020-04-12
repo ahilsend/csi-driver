@@ -4,7 +4,8 @@ import (
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
 	"hetzner.cloud/csi/csi"
-	"k8s.io/kubernetes/pkg/util/mount"
+	"k8s.io/utils/exec"
+	"k8s.io/utils/mount"
 	"k8s.io/kubernetes/pkg/util/resizefs"
 )
 
@@ -24,7 +25,7 @@ func NewLinuxResizeService(logger log.Logger) *LinuxResizeService {
 		logger: logger,
 		resizer: resizefs.NewResizeFs(&mount.SafeFormatAndMount{
 			Interface: mount.New(""),
-			Exec:      mount.NewOsExec(),
+			Exec:      exec.New(),
 		}),
 	}
 }

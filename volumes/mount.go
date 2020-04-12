@@ -6,7 +6,8 @@ import (
 
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
-	"k8s.io/kubernetes/pkg/util/mount"
+	"k8s.io/utils/exec"
+	"k8s.io/utils/mount"
 
 	"hetzner.cloud/csi/csi"
 )
@@ -46,7 +47,7 @@ func NewLinuxMountService(logger log.Logger) *LinuxMountService {
 		logger: logger,
 		mounter: &mount.SafeFormatAndMount{
 			Interface: mount.New(""),
-			Exec:      mount.NewOsExec(),
+			Exec:      exec.New(),
 		},
 	}
 }
@@ -59,10 +60,10 @@ func (s *LinuxMountService) Stage(volume *csi.Volume, stagingTargetPath string, 
 		"fs-type", opts.FSType,
 	)
 
-	isNotMountPoint, err := s.mounter.Interface.IsNotMountPoint(stagingTargetPath)
+	isNotMountPoint, err := s.mounter.Interface.IsLikelyNotMountPoint(stagingTargetPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			if err := s.mounter.Interface.MakeDir(stagingTargetPath); err != nil {
+			if err := makeDir(stagingTargetPath); err != nil {
 				return err
 			}
 			isNotMountPoint = true
@@ -97,7 +98,7 @@ func (s *LinuxMountService) Publish(volume *csi.Volume, targetPath string, stagi
 		"additional-mount-options", opts.Additional,
 	)
 
-	if err := s.mounter.Interface.MakeDir(targetPath); err != nil {
+	if err := makeDir(targetPath); err != nil {
 		return err
 	}
 
@@ -138,4 +139,17 @@ func (s *LinuxMountService) PathExists(path string) (bool, error) {
 		return false, nil
 	}
 	return false, err
+}
+
+/// makeDir creates a new directory.
+// If pathname already exists as a directory, no error is returned.
+// If pathname already exists as a file, an error is returned.
+func makeDir(pathname string) error {
+	err := os.MkdirAll(pathname, os.FileMode(0755))
+	if err != nil {
+		if !os.IsExist(err) {
+			return err
+		}
+	}
+	return nil
 }
