@@ -47,6 +47,7 @@ func newNodeServerTestEnv() nodeServiceTestEnv {
 		service: NewNodeService(
 			log.NewNopLogger(),
 			server,
+			false,
 			volumeService,
 			volumeMountService,
 			volumeResizeService,

@@ -2,7 +2,10 @@ package volumes
 
 import (
 	"fmt"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"os"
+	"path/filepath"
 
 	"github.com/go-kit/kit/log"
 	"github.com/go-kit/kit/log/level"
@@ -31,7 +34,8 @@ func NewMountOpts() MountOpts {
 type MountService interface {
 	Stage(volume *csi.Volume, stagingTargetPath string, opts MountOpts) error
 	Unstage(volume *csi.Volume, stagingTargetPath string) error
-	Publish(volume *csi.Volume, targetPath string, stagingTargetPath string, opts MountOpts) error
+	PublishFilesystem(volume *csi.Volume, targetPath string, stagingTargetPath string, opts MountOpts) error
+	PublishBlock(volume *csi.Volume, targetPath string, opts MountOpts) error
 	Unpublish(volume *csi.Volume, targetPath string) error
 	PathExists(path string) (bool, error)
 }
@@ -63,7 +67,7 @@ func (s *LinuxMountService) Stage(volume *csi.Volume, stagingTargetPath string, 
 	isNotMountPoint, err := s.mounter.Interface.IsLikelyNotMountPoint(stagingTargetPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			if err := makeDir(stagingTargetPath); err != nil {
+			if err := s.makeDir(stagingTargetPath); err != nil {
 				return err
 			}
 			isNotMountPoint = true
@@ -87,9 +91,9 @@ func (s *LinuxMountService) Unstage(volume *csi.Volume, stagingTargetPath string
 	return s.mounter.Interface.Unmount(stagingTargetPath)
 }
 
-func (s *LinuxMountService) Publish(volume *csi.Volume, targetPath string, stagingTargetPath string, opts MountOpts) error {
+func (s *LinuxMountService) PublishFilesystem(volume *csi.Volume, targetPath string, stagingTargetPath string, opts MountOpts) error {
 	level.Debug(s.logger).Log(
-		"msg", "publishing volume",
+		"msg", "publishing fs volume",
 		"volume-name", volume.Name,
 		"target-path", targetPath,
 		"staging-target-path", stagingTargetPath,
@@ -98,23 +102,46 @@ func (s *LinuxMountService) Publish(volume *csi.Volume, targetPath string, stagi
 		"additional-mount-options", opts.Additional,
 	)
 
-	if err := makeDir(targetPath); err != nil {
+	if err := s.makeDir(targetPath); err != nil {
 		return err
 	}
+	return s.mountBind(stagingTargetPath, targetPath, opts)
+}
 
-	options := []string{"bind"}
-	if opts.Readonly {
-		options = append(options, "ro")
-	}
-	for _, o := range opts.Additional {
-		options = append(options, o)
+func (s *LinuxMountService) PublishBlock(volume *csi.Volume, targetPath string, opts MountOpts) error {
+	level.Debug(s.logger).Log(
+		"msg", "publishing block volume",
+		"volume-name", volume.Name,
+		"target-path", targetPath,
+		"volume-path", volume.LinuxDevice,
+		"readonly", opts.Readonly,
+		"additional-mount-options", opts.Additional,
+	)
+
+	targetDir := filepath.Dir(targetPath)
+
+	// create the global mount path if it is missing
+	// Path in the form of /var/lib/kubelet/plugins/kubernetes.io/csi/volumeDevices/publish/{volumeName}
+	exists, err := s.PathExists(targetDir)
+	if err != nil {
+		return status.Errorf(codes.Internal, "failed to check if path exists %q: %v", targetDir, err)
 	}
 
-	if err := s.mounter.Interface.Mount(stagingTargetPath, targetPath, opts.FSType, options); err != nil {
-		return err
+	if !exists {
+		if err := s.makeDir(targetDir); err != nil {
+			return err
+		}
 	}
 
-	return nil
+	// Create the mount point as a file since bind mount device node requires it to be a file
+	if err := s.makeFile(targetPath); err != nil {
+		if removeErr := os.Remove(targetPath); removeErr != nil {
+			return status.Errorf(codes.Internal, "failed to remove mount target %q: %v", targetPath, removeErr)
+		}
+		return status.Errorf(codes.Internal, "failed to create block mount file %q: %v", targetPath, err)
+	}
+
+	return s.mountBind(volume.LinuxDevice, targetPath, opts)
 }
 
 func (s *LinuxMountService) Unpublish(volume *csi.Volume, targetPath string) error {
@@ -141,10 +168,18 @@ func (s *LinuxMountService) PathExists(path string) (bool, error) {
 	return false, err
 }
 
-/// makeDir creates a new directory.
-// If pathname already exists as a directory, no error is returned.
-// If pathname already exists as a file, an error is returned.
-func makeDir(pathname string) error {
+func (s *LinuxMountService) makeFile(pathname string) error {
+	f, err := os.OpenFile(pathname, os.O_CREATE, os.FileMode(0644))
+	if err != nil {
+		if !os.IsExist(err) {
+			return err
+		}
+	}
+	defer f.Close()
+	return nil
+}
+
+func (s *LinuxMountService) makeDir(pathname string) error {
 	err := os.MkdirAll(pathname, os.FileMode(0755))
 	if err != nil {
 		if !os.IsExist(err) {
@@ -152,4 +187,15 @@ func makeDir(pathname string) error {
 		}
 	}
 	return nil
+}
+
+func (s *LinuxMountService) mountBind(sourcePath string, targetPath string, opts MountOpts) error {
+
+	options := []string{"bind"}
+	if opts.Readonly {
+		options = append(options, "ro")
+	}
+	options = append(options, opts.Additional...)
+
+	return s.mounter.Interface.Mount(sourcePath, targetPath, opts.FSType, options)
 }
